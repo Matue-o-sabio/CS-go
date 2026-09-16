@@ -1,1 +1,329 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web FPS Multiplayer - Three.js</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Courier New', Courier, monospace; background-color: #000; }
+        #ui { position: absolute; width: 100%; height: 100%; pointer-events: none; }
+        
+        /* Crosshair */
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 10px; height: 10px; background-color: lime;
+            transform: translate(-50%, -50%); border-radius: 50%;
+        }
+        
+        /* HUD */
+        .hud-box {
+            position: absolute; bottom: 20px; padding: 10px 20px;
+            background: rgba(0,0,0,0.6); color: white; border: 2px solid #555;
+            font-size: 24px; font-weight: bold;
+        }
+        #health { left: 20px; color: #ff4c4c; }
+        #ammo { right: 20px; color: #f9ca24; }
+        #scoreboard { top: 20px; right: 20px; font-size: 18px; position: absolute; background: rgba(0,0,0,0.6); color: white; padding: 10px; }
 
+        /* Menu de Início */
+        #menu {
+            position: absolute; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); color: white;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            pointer-events: auto; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="crosshair"></div>
+        <div id="health" class="hud-box">HP: 100</div>
+        <div id="ammo" class="hud-box">AMMO: 30</div>
+        <div id="scoreboard">Kills: 0 | Deaths: 0</div>
+    </div>
+
+    <div id="menu">
+        <h1>Web FPS Multiplayer</h1>
+        <p>Clique para jogar (Use WASD para andar, Mouse para olhar, Espaço para pular, Clique para Atirar)</p>
+    </div>
+
+    <!-- Módulos e CDNs -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "socket.io-client": "https://cdn.socket.io/4.7.2/socket.io.esm.min.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        import { io } from 'socket.io-client';
+
+        // ==========================================
+        // 1. CONFIGURAÇÃO DE REDE (Socket.IO)
+        // ==========================================
+        // MUDAR AQUI PARA O SEU SERVIDOR QUANDO HOSPEDAR NO GITHUB PAGES!
+        const SERVER_URL = 'http://127.0.0.1:5000'; 
+        const socket = io(SERVER_URL);
+
+        let myId = null;
+        let myData = { hp: 100, kills: 0, deaths: 0 };
+        const playersData = {}; // Dados puros vindos da rede
+        const playerMeshes = {}; // Objetos 3D na cena
+
+        // ==========================================
+        // 2. CONFIGURAÇÃO THREE.JS (Cena, Câmera, Renderer)
+        // ==========================================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb); // Céu azul
+        scene.fog = new THREE.Fog(0x87ceeb, 0, 50);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // ==========================================
+        // 3. ILUMINAÇÃO E MAPA (Low-Poly Arena)
+        // ==========================================
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(20, 40, 20);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // Chão
+        const floorGeo = new THREE.PlaneGeometry(100, 100);
+        const floorMat = new THREE.MeshLambertMaterial({ color: 0x556b2f }); // Verde escuro
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // Caixas como cobertura
+        const boxGeo = new THREE.BoxGeometry(2, 2, 2);
+        const boxMat = new THREE.MeshLambertMaterial({ color: 0x8b4513 });
+        for(let i=0; i<20; i++) {
+            const box = new THREE.Mesh(boxGeo, boxMat);
+            box.position.set((Math.random() - 0.5) * 80, 1, (Math.random() - 0.5) * 80);
+            box.castShadow = true;
+            box.receiveShadow = true;
+            scene.add(box);
+        }
+
+        // ==========================================
+        // 4. JOGADOR (Arma, Física e Controles)
+        // ==========================================
+        const controls = new PointerLockControls(camera, document.body);
+        const menu = document.getElementById('menu');
+
+        menu.addEventListener('click', () => { controls.lock(); });
+        controls.addEventListener('lock', () => { menu.style.display = 'none'; });
+        controls.addEventListener('unlock', () => { menu.style.display = 'flex'; });
+
+        // Arma 3D
+        const weaponGroup = new THREE.Group();
+        const gunGeo = new THREE.BoxGeometry(0.1, 0.1, 0.4);
+        const gunMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+        const gun = new THREE.Mesh(gunGeo, gunMat);
+        gun.position.set(0.3, -0.3, -0.5);
+        weaponGroup.add(gun);
+        
+        // Muzzle Flash (Fogo do cano)
+        const flashLight = new THREE.PointLight(0xffaa00, 2, 5);
+        flashLight.position.set(0.3, -0.3, -0.8);
+        flashLight.visible = false;
+        weaponGroup.add(flashLight);
+        camera.add(weaponGroup);
+        scene.add(camera);
+
+        // Variáveis de Movimento
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let canJump = false;
+        const speed = 40.0;
+        
+        let ammo = 30;
+        const raycaster = new THREE.Raycaster();
+
+        // Inputs
+        document.addEventListener('keydown', (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'Space': if (canJump) velocity.y += 20; canJump = false; break;
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyD': moveRight = false; break;
+            }
+        });
+
+        // Tiro
+        document.addEventListener('mousedown', () => {
+            if (!controls.isLocked || ammo <= 0) return;
+            
+            ammo--;
+            document.getElementById('ammo').innerText = `AMMO: ${ammo}`;
+            
+            // Recuo Visual
+            gun.position.z += 0.1; 
+            gun.rotation.x += 0.05;
+            
+            // Flash
+            flashLight.visible = true;
+            setTimeout(() => { flashLight.visible = false; }, 50);
+            setTimeout(() => { if (ammo === 0) { ammo = 30; document.getElementById('ammo').innerText = `AMMO: ${ammo}`; } }, 2000); // Reload fictício
+
+            // Hitscan (Raycast) contra outros jogadores
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const enemies = Object.values(playerMeshes);
+            const intersects = raycaster.intersectObjects(enemies);
+
+            if (intersects.length > 0) {
+                const targetMesh = intersects[0].object;
+                socket.emit('shoot', { target_id: targetMesh.userData.id });
+            }
+        });
+
+        // ==========================================
+        // 5. EVENTOS DO MULTIPLAYER (SocketIO)
+        // ==========================================
+        socket.on('init_player', (data) => {
+            myId = data.id;
+            camera.position.set(data.x, data.y, data.z);
+        });
+
+        socket.on('state_update', (serverPlayers) => {
+            // Atualiza os dados de todos
+            for (const id in serverPlayers) {
+                if (id === myId) {
+                    // Atualiza própria UI (Vida, Score)
+                    myData = serverPlayers[id];
+                    document.getElementById('health').innerText = `HP: ${myData.hp}`;
+                    document.getElementById('scoreboard').innerText = `Kills: ${myData.kills} | Deaths: ${myData.deaths}`;
+                    if(myData.hp <= 0) alert("Você Morreu!"); // Feedback tosco de morte
+                    continue; // Não renderiza a si mesmo
+                }
+                
+                playersData[id] = serverPlayers[id];
+
+                // Cria o boneco do inimigo se não existir
+                if (!playerMeshes[id]) {
+                    const geometry = new THREE.CylinderGeometry(0.5, 0.5, 2, 8); // Personagem básico
+                    const material = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+                    const mesh = new THREE.Mesh(geometry, material);
+                    mesh.userData.id = id;
+                    mesh.castShadow = true;
+                    scene.add(mesh);
+                    playerMeshes[id] = mesh;
+                }
+            }
+
+            // Remove quem desconectou
+            for (const id in playerMeshes) {
+                if (!serverPlayers[id]) {
+                    scene.remove(playerMeshes[id]);
+                    delete playerMeshes[id];
+                    delete playersData[id];
+                }
+            }
+        });
+
+        socket.on('hit_feedback', (target_id) => {
+            // Pisca branco ao tomar tiro
+            if(playerMeshes[target_id]) {
+                const mat = playerMeshes[target_id].material;
+                const oldColor = mat.color.getHex();
+                mat.color.setHex(0xffffff);
+                setTimeout(() => { mat.color.setHex(oldColor); }, 100);
+            }
+        });
+
+        // ==========================================
+        // 6. LOOP DE JOGO E INTERPOLAÇÃO
+        // ==========================================
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            // Interpolação suave dos adversários (Lerp para evitar travamentos de rede)
+            for (const id in playerMeshes) {
+                const mesh = playerMeshes[id];
+                const data = playersData[id];
+                if (data) {
+                    const targetPos = new THREE.Vector3(data.x, data.y, data.z);
+                    mesh.position.lerp(targetPos, 0.2); // Interpolação de Posição
+                    // Simulando rotação do adversário (olhando para o lado certo)
+                    mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, data.ry, 0.2); 
+                }
+            }
+
+            // Suavizar retorno do recuo da arma
+            gun.position.lerp(new THREE.Vector3(0.3, -0.3, -0.5), 0.1);
+            gun.rotation.x = THREE.MathUtils.lerp(gun.rotation.x, 0, 0.1);
+
+            // FÍSICA E MOVIMENTO LOCAL (Client-side)
+            if (controls.isLocked) {
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                velocity.y -= 9.8 * 10.0 * delta; // Gravidade
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                controls.getObject().position.y += velocity.y * delta;
+
+                if (controls.getObject().position.y < 1) {
+                    velocity.y = 0;
+                    controls.getObject().position.y = 1;
+                    canJump = true;
+                }
+
+                // Enviar posição local para o servidor
+                if (socket.connected) {
+                    const pos = controls.getObject().position;
+                    // Pegar a rotação Y da câmera (Para onde o jogador está olhando)
+                    const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+                    socket.emit('move', { x: pos.x, y: pos.y, z: pos.z, ry: euler.y });
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Redimensionar tela
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
