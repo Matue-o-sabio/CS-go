@@ -856,11 +856,11 @@ function checkCollision(position, radius, grid) {
   const size = grid.length;
   const cellSize = CONFIG.cellSize;
   
-  // Converter para coordenadas de grid
+  // Converter para coordenadas de grid (contínuas)
   const gx = position.x / cellSize + size / 2;
   const gz = position.z / cellSize + size / 2;
   
-  // Verificar células ao redor
+  // Range de células a checar (bounding box do círculo)
   const minX = Math.floor(gx - radius / cellSize);
   const maxX = Math.floor(gx + radius / cellSize);
   const minZ = Math.floor(gz - radius / cellSize);
@@ -870,13 +870,29 @@ function checkCollision(position, radius, grid) {
     for (let x = minX; x <= maxX; x++) {
       if (x < 0 || x >= size || y < 0 || y >= size) return true;
       if (grid[y] && grid[y][x] === 1) {
-        // Verificar se é parede secreta (não colide se revelada)
+        // Ignorar parede secreta revelada
         if (state.secretRoom && state.secretRoom.revealed) {
           const wallGx = Math.floor(state.secretRoom.wallX / cellSize + size / 2);
           const wallGz = Math.floor(state.secretRoom.wallZ / cellSize + size / 2);
           if (x === wallGx && y === wallGz) continue;
         }
-        return true;
+        
+        // Colisão círculo vs AABB da célula
+        const cellMinX = (x - size / 2) * cellSize;
+        const cellMaxX = cellMinX + cellSize;
+        const cellMinZ = (y - size / 2) * cellSize;
+        const cellMaxZ = cellMinZ + cellSize;
+        
+        // Ponto mais próximo do círculo dentro do AABB
+        const closestX = Math.max(cellMinX, Math.min(position.x, cellMaxX));
+        const closestZ = Math.max(cellMinZ, Math.min(position.z, cellMaxZ));
+        
+        const dx = position.x - closestX;
+        const dz = position.z - closestZ;
+        
+        if (dx * dx + dz * dz < radius * radius) {
+          return true;
+        }
       }
     }
   }
